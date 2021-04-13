@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+
+import collections
+from glob import glob
+import json
+import os
+import random
+
+import xml.etree.ElementTree as ETree
+
+I, O, B = 'I', 'O', 'B'
+
+def xml2iob(et_node, data):
+    def tag_text(text, tag_type):
+        tag_pos = B
+
+        lines = text.split('\n')
+        nlines = len(lines)
+
+        for i, line in enumerate(lines):
+            line = line.strip(' ')
+
+            for word in line.split(' '):
+                if not word: continue
+
+                tag = tag_pos + '-' + tag_type if tag_type else O
+                data[-1].append((word, tag))
+                tag_pos = I
+
+            if i < nlines - 1:
+                data.append([])
+
+    if et_node.text:
+        tag_type = et_node.attrib['TYPE'].lower() if et_node.tag == 'ENAMEX' else ''
+        tag_text(et_node.text, tag_type)
+
+    for et_child in et_node:
+        xml2iob(et_child, data)
+
+    if et_node.tail:
+        tag_text(et_node.tail, '')
+
+datadir = 'data/files/data/english/annotations/'
+filenames = sorted(glob(os.path.join(datadir, '**/*.name'), recursive=True))
+
+trainfile, validfile, testfile = 'train.txt', 'valid.txt', 'test.txt'
+for filename in (trainfile, validfile, testfile):
+    with open(filename, mode='wt', encoding='utf8') as fh:
+        pass
+
+rng = random.Random(42)
+valid_frac = 0.07
+test_frac = 0.07
+
+iob_data = []
+for filename in filenames:
+    print(filename, '- ', end='')
+
+    with open(filename, mode='rt', encoding='utf8') as fh:
+        raw_data = fh.read()
+
+    et_root = ETree.fromstring(raw_data)
+
+    local_iob_data = [[]]
+    xml2iob(et_root, local_iob_data)
+    local_iob_data = list(filter(lambda sent: sent, local_iob_data))
+
+    nsent = len(local_iob_data)
+    nraw_sent = len(list(filter(lambda line: line.strip(), raw_data.split('\n')))) - 2
+    if nsent != nraw_sent:
+        raise RuntimeError(
+            f'Parsed sentences `{nsent}` does not match number of lines `{nraw_sent}` in `{filename}`')
+
+    iob_data.extend(local_iob_data)
+    print(nsent)
+
+rng.shuffle(iob_data)
+
+def write_iob(filename, data):
+    with open(filename, mode='at', encoding='utf8') as fh:
+        for i, sent in enumerate(data):
+            #print(sent)
+            fh.writelines([' '.join(token_tag) + '\n' for token_tag in sent])
+            if i < nsent - 1:
+                fh.write('\n')
+
+nsent = len(iob_data)
+valid_end = int(valid_frac * nsent)
+test_end = valid_end + int(test_frac * nsent)
+
+write_iob(validfile, iob_data[:valid_end])
+write_iob(testfile, iob_data[valid_end:test_end])
+write_iob(trainfile, iob_data[test_end:])
+
+print('=======')
+print('total sentences:', nsent)
+print('total tokens:', sum(len(sent) for sent in iob_data))
+
+labels = sorted(set(label for sent in iob_data for word, label in sent))
+print('total labels:', len(labels), '-', labels)
+
+tag_counts = collections.defaultdict(int)
+for sent in iob_data:
+    for word, tag in sent:
+        if tag is O:
+            continue
+
+        tag_pos, tag_type = tag.split('-')
+        if tag_pos == B:
+            tag_counts[tag_type] += 1
+tag_counts = sorted(tag_counts.items(), key=lambda pair: pair[1], reverse=True)
+
+print('total types:', len(tag_counts))
+print('\n'.join(str(tag_count) for tag_count in tag_counts))
