@@ -2,92 +2,156 @@
 
 import collections
 from glob import glob
-import json
-import os
-import random
+import json, os, random
 
+# use element tree to parse xml
 import xml.etree.ElementTree as ETree
 
+# constants for In, Out and Begin prefix
+# tags will be in format [IOB]-{type}, e.g., `B-person`
 I, O, B = 'I', 'O', 'B'
 
 def xml2iob(et_node, data):
-    def tag_text(text, tag_type):
-        tag_pos = B
+    '''Recursive function for converting an Ontonotes 5 XML file into IOB format.
 
+    Args:
+        et_node:  xml.etree.ElementTree.Element
+            An element tree node, generally starting with the root node of the XML document
+            and then recursing on each child node.
+        data:  list(list(tuple(str, str))
+            Sentences of words of tag/token 2-tuples.  This is the IOB data and the outer
+            list will be extended by this function.  Initially, data should start as an
+            empty `[[]]`.
+    '''
+    def tag_text(text, tag_type):
+        '''Create `list((word, tag))` where the outer list represents sentences, separated
+        by `\n` newlines and the `(word, tag)` 2-tuples are string token-tag pairs.
+
+        text:  str
+            The text to tag.  Tokens are separated by whitespace and lines by the `\n`
+            newline character.
+        tag_type: str
+            The entity type for the tag, e.g., `person`.  The `IOB` part will be determined
+            by the sequence of tokens in the text.
+        '''
         lines = text.split('\n')
         nlines = len(lines)
 
+        # for each line in the text
         for i, line in enumerate(lines):
+            # start with the begin position
+            tag_pos = B
+
+            # remove leading and trailing whitespace
             line = line.strip(' ')
 
+            # for each whitespace delimited token
             for word in line.split(' '):
+                # skip empty tokens and repeated spaces
                 if not word: continue
 
+                # build the tag from position and type
                 tag = tag_pos + '-' + tag_type if tag_type else O
+
+                # append to the sentence
                 data[-1].append((word, tag))
+
+                # remaining tokens are inside
                 tag_pos = I
 
+            # split off new sentence
             if i < nlines - 1:
                 data.append([])
 
+    # Main text of the node, not inside subtags.  Note that a node may not have text,
+    # e.g., for the root `<DOC>` tag if the first word is an entity.
+    # For entity, `ENAMEX` tags, this will contain the entity tokens.
     if et_node.text:
+        # `ENAMEX` tags (whatever that manes) in `.name` files surround entity spans.
+        # The `TYPE` attribute contains the type of the entity.
         tag_type = et_node.attrib['TYPE'].lower() if et_node.tag == 'ENAMEX' else ''
         tag_text(et_node.text, tag_type)
 
+    # Recurse, depth first, over each child.
     for et_child in et_node:
         xml2iob(et_child, data)
 
+    # The tail is the text *after* the tag.  Since we don't support nested `ENAMEX` tags,
+    # we just assume this is outside of any entity and is tagged as `O`.
     if et_node.tail:
         tag_text(et_node.tail, '')
 
+# path containing subdirectories with the `.name` annotation XML files
+# these are provided with the Ontonotes 5 dataset, which must be acquired from the LDC
 datadir = 'data/files/data/english/annotations/'
+
+# recursively glob all the file names
 filenames = sorted(glob(os.path.join(datadir, '**/*.name'), recursive=True))
 
-trainfile, validfile, testfile = 'train.txt', 'valid.txt', 'test.txt'
-for filename in (trainfile, validfile, testfile):
-    with open(filename, mode='wt', encoding='utf8') as fh:
-        pass
-
-rng = random.Random(42)
-valid_frac = 0.07
-test_frac = 0.07
-
+# the full IOB data from each file
 iob_data = []
 for filename in filenames:
     print(filename, '- ', end='')
 
+    # open the current file for reading, UTF8 or bust!
     with open(filename, mode='rt', encoding='utf8') as fh:
         raw_data = fh.read()
 
+    # get the root node from the string file contents
     et_root = ETree.fromstring(raw_data)
 
-    local_iob_data = [[]]
+    # the IOB data for this file is extracted recursively
+    local_iob_data = [[]] # this is what's built up
     xml2iob(et_root, local_iob_data)
+
+    # filter any empties
+    # FIXME: why is this necessary?
     local_iob_data = list(filter(lambda sent: sent, local_iob_data))
 
+    # verify that the number of sentences matches the number of lines in the document
+    # this appears to be how the `.name` files are structured.
     nsent = len(local_iob_data)
     nraw_sent = len(list(filter(lambda line: line.strip(), raw_data.split('\n')))) - 2
     if nsent != nraw_sent:
         raise RuntimeError(
             f'Parsed sentences `{nsent}` does not match number of lines `{nraw_sent}` in `{filename}`')
 
+    # append to the full IOB data
     iob_data.extend(local_iob_data)
     print(nsent)
 
-rng.shuffle(iob_data)
-
 def write_iob(filename, data):
+    '''Write IOB sentence data to file.
+    '''
     with open(filename, mode='at', encoding='utf8') as fh:
         for i, sent in enumerate(data):
-            #print(sent)
             fh.writelines([' '.join(token_tag) + '\n' for token_tag in sent])
             if i < nsent - 1:
                 fh.write('\n')
+
+# truncate the training, validation and test files
+iobfile, trainfile, validfile, testfile = 'iob.txt', 'train.txt', 'valid.txt', 'test.txt'
+for filename in (iobfile, trainfile, validfile, testfile):
+    with open(filename, mode='wt', encoding='utf8') as fh:
+        pass
+
+# write the full data to `iob.txt`
+write_iob(iobfile, iob_data)
+
+# random split with seeded number generator
+# FIXME: this should be done in a standardized way to align with the SOTA benchmarks!!!
+rng = random.Random(42)
+valid_frac = 0.07
+test_frac = 0.07
+
+# shuffle the sentences
+rng.shuffle(iob_data)
 
 nsent = len(iob_data)
 valid_end = int(valid_frac * nsent)
 test_end = valid_end + int(test_frac * nsent)
 
+# write the train, valid and test files
 write_iob(validfile, iob_data[:valid_end])
 write_iob(testfile, iob_data[valid_end:test_end])
 write_iob(trainfile, iob_data[test_end:])
